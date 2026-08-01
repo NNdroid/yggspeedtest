@@ -3,6 +3,7 @@ package netstack
 import (
 	"log"
 	"net"
+	"sync"
 
 	"github.com/yggdrasil-network/yggdrasil-go/src/core"
 	"github.com/yggdrasil-network/yggdrasil-go/src/ipv6rwc"
@@ -19,49 +20,82 @@ type YggdrasilNIC struct {
 	stack      *YggdrasilNetstack
 	ipv6rwc    *ipv6rwc.ReadWriteCloser
 	dispatcher stack.NetworkDispatcher
-	readBuf    []byte
-	writeBuf   []byte
+	bufPool    *sync.Pool
 	rstPackets chan *stack.PacketBuffer
+	closeChan  chan struct{}
+	closeOnce  sync.Once
 }
 
 func (s *YggdrasilNetstack) NewYggdrasilNIC(ygg *core.Core) tcpip.Error {
 	rwc := ipv6rwc.NewReadWriteCloser(ygg)
 	mtu := rwc.MTU()
 	nic := &YggdrasilNIC{
-		ipv6rwc:    rwc,
-		readBuf:    make([]byte, mtu),
-		writeBuf:   make([]byte, mtu),
+		stack:   s,
+		ipv6rwc: rwc,
+		bufPool: &sync.Pool{
+			New: func() interface{} {
+				return make([]byte, mtu)
+			},
+		},
 		rstPackets: make(chan *stack.PacketBuffer, 100),
+		closeChan:  make(chan struct{}),
 	}
 	if err := s.stack.CreateNIC(1, nic); err != nil {
 		return err
 	}
+
 	go func() {
-		var rx int
-		var err error
 		for {
-			rx, err = nic.ipv6rwc.Read(nic.readBuf)
+			select {
+			case <-nic.closeChan:
+				return
+			default:
+			}
+
+			readBuf := nic.bufPool.Get().([]byte)
+			rx, err := nic.ipv6rwc.Read(readBuf)
 			if err != nil {
-				log.Println(err)
+				nic.bufPool.Put(readBuf)
+				select {
+				case <-nic.closeChan:
+					return
+				default:
+				}
+				log.Println("Yggdrasil RWC read error:", err)
 				break
 			}
+
+			// Copy payload data into a dedicated slice for stack buffer delivery
+			// to guarantee no concurrent modification race condition occurs.
+			payloadData := make([]byte, rx)
+			copy(payloadData, readBuf[:rx])
+			nic.bufPool.Put(readBuf)
+
 			pkb := stack.NewPacketBuffer(stack.PacketBufferOptions{
-				Payload: buffer.MakeWithData(nic.readBuf[:rx]),
+				Payload: buffer.MakeWithData(payloadData),
 			})
-			nic.dispatcher.DeliverNetworkPacket(ipv6.ProtocolNumber, pkb)
+			if nic.dispatcher != nil {
+				nic.dispatcher.DeliverNetworkPacket(ipv6.ProtocolNumber, pkb)
+			}
 			pkb.DecRef()
 		}
 	}()
+
 	go func() {
 		for {
-			pkt := <-nic.rstPackets
-			if pkt == nil {
-				continue
+			select {
+			case <-nic.closeChan:
+				return
+			case pkt, ok := <-nic.rstPackets:
+				if !ok || pkt == nil {
+					return
+				}
+				_ = nic.writePacket(pkt)
+				pkt.DecRef()
 			}
-			_ = nic.writePacket(pkt)
-			pkt.DecRef()
 		}
 	}()
+
 	_, snet, err := net.ParseCIDR("0200::/7")
 	if err != nil {
 		return &tcpip.ErrBadAddress{}
@@ -114,20 +148,19 @@ func (*YggdrasilNIC) Wait() {}
 func (e *YggdrasilNIC) writePacket(
 	pkt *stack.PacketBuffer,
 ) tcpip.Error {
-	// We need to recover from panic() here because
-	// parser in ToView() gets confused on some packets
-	// without payload and panics
 	defer func() {
-		r := recover()
-		if r != nil {
-		}
+		_ = recover()
 	}()
+
 	vv := pkt.ToView()
-	n, err := vv.Read(e.writeBuf)
+	writeBuf := e.bufPool.Get().([]byte)
+	defer e.bufPool.Put(writeBuf)
+
+	n, err := vv.Read(writeBuf)
 	if err != nil {
 		return &tcpip.ErrAborted{}
 	}
-	_, err = e.ipv6rwc.Write(e.writeBuf[:n])
+	_, err = e.ipv6rwc.Write(writeBuf[:n])
 	if err != nil {
 		return &tcpip.ErrAborted{}
 	}
@@ -182,8 +215,13 @@ func (e *YggdrasilNIC) ParseHeader(*stack.PacketBuffer) bool {
 }
 
 func (e *YggdrasilNIC) Close() {
-	e.stack.stack.RemoveNIC(1)
-	e.dispatcher = nil
+	e.closeOnce.Do(func() {
+		close(e.closeChan)
+		if e.stack != nil && e.stack.stack != nil {
+			e.stack.stack.RemoveNIC(1)
+		}
+		e.dispatcher = nil
+	})
 }
 
 func (e *YggdrasilNIC) SetOnCloseAction(func()) {}

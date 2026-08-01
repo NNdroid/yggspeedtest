@@ -105,3 +105,10 @@ func (s *YggdrasilNetstack) ListenUDP(addr *net.UDPAddr) (*gonet.UDPConn, error)
 	fa, pn, _ := convertToFullAddr(addr.IP, addr.Port)
 	return gonet.DialUDP(s.stack, &fa, nil, pn)
 }
+
+func (s *YggdrasilNetstack) Close() {
+	if s != nil && s.stack != nil {
+		s.stack.Close()
+	}
+}
+
