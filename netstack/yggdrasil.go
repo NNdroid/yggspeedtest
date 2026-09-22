@@ -1,7 +1,6 @@
 package netstack
 
 import (
-	"log"
 	"net"
 	"sync"
 
@@ -24,6 +23,31 @@ type YggdrasilNIC struct {
 	rstPackets chan *stack.PacketBuffer
 	closeChan  chan struct{}
 	closeOnce  sync.Once
+}
+
+// debugLogFn is how the netstack layer reaches the application logger. Raw
+// log.Println leaked "RWC read error: ErrClosed" onto stderr for every peer
+// teardown, once per NIC, in a format the rest of the tool does not use.
+var (
+	debugLogMu sync.Mutex
+	debugLogFn func(string, ...any)
+)
+
+// SetDebugLogger installs the logger used for netstack-internal diagnostics.
+// It must be called before any NIC is created.
+func SetDebugLogger(fn func(string, ...any)) {
+	debugLogMu.Lock()
+	defer debugLogMu.Unlock()
+	debugLogFn = fn
+}
+
+func debugLogf(format string, args ...any) {
+	debugLogMu.Lock()
+	fn := debugLogFn
+	debugLogMu.Unlock()
+	if fn != nil {
+		fn(format, args...)
+	}
 }
 
 func (s *YggdrasilNetstack) NewYggdrasilNIC(ygg *core.Core) tcpip.Error {
@@ -61,8 +85,10 @@ func (s *YggdrasilNetstack) NewYggdrasilNIC(ygg *core.Core) tcpip.Error {
 					return
 				default:
 				}
-				log.Println("Yggdrasil RWC read error:", err)
-				break
+				// ErrClosed here is normal teardown order: core.Close() ends the
+				// read before the NIC's closeChan is signalled.
+				debugLogf("Yggdrasil RWC read error: %v", err)
+				return
 			}
 
 			// Copy payload data into a dedicated slice for stack buffer delivery
@@ -191,7 +217,7 @@ func (e *YggdrasilNIC) WritePackets(
 		}
 		err = e.writePacket(pkt)
 		if err != nil {
-			log.Println(err)
+			debugLogf("Yggdrasil writePackets failed: %v", err)
 			return i - 1, err
 		}
 	}

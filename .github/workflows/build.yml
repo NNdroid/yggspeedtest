@@ -14,31 +14,31 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    name: Build (${{ matrix.goos }}/${{ matrix.goarch }}${{ matrix.goarm && format('v{0}', matrix.goarm) || '' }})
+  test:
+    name: Test
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
-          - goos: linux
-            goarch: arm
-            goarm: '7'
-          - goos: linux
-            goarch: mipsle
-            gomips: softfloat
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
-          - goos: windows
-            goarch: amd64
-          - goos: windows
-            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -count=1 ./...
+
+  build:
+    name: Build ${{ matrix.bin }}
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        bin: [yggspeedtest, yggspeedtest-web]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -46,50 +46,82 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '>=1.22'
+          go-version: '1.26'
           cache: true
 
-      - name: Build Binary
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          GOARM: ${{ matrix.goarm }}
-          GOMIPS: ${{ matrix.gomips }}
-          CGO_ENABLED: '0'
+      - name: Resolve version
+        id: ver
         run: |
-          BINARY_NAME="yggspeedtest-${{ matrix.goos }}-${{ matrix.goarch }}"
-          if [ "${{ matrix.goarch }}" = "arm" ] && [ -n "${{ matrix.goarm }}" ]; then
-            BINARY_NAME="${BINARY_NAME}v${{ matrix.goarm }}"
-          fi
-          
-          EXECUTABLE="${BINARY_NAME}"
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            EXECUTABLE="${EXECUTABLE}.exe"
-          fi
-          
           VERSION="${{ github.ref_name }}"
           if [ -z "$VERSION" ] || [ "$VERSION" = "main" ] || [ "$VERSION" = "master" ]; then
             VERSION="v1.0.$(date +'%Y%m%d')"
           fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Cross compile
+        env:
+          CGO_ENABLED: '0'
+          BIN: ${{ matrix.bin }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          # 平台列表与 scripts/build.sh 保持一致: "GOOS/GOARCH/VARIANT"
+          PLATFORMS=(
+            "linux/amd64"
+            "linux/arm64"
+            "linux/arm/7"
+            "linux/mipsle/softfloat"
+            "darwin/amd64"
+            "darwin/arm64"
+            "windows/amd64"
+            "windows/arm64"
+          )
 
           mkdir -p dist
-          go build -ldflags="-s -w -X main.Version=${VERSION}" -o "dist/${EXECUTABLE}" .
+          for PLATFORM in "${PLATFORMS[@]}"; do
+            IFS="/" read -r -a PARTS <<< "$PLATFORM"
+            OS=${PARTS[0]}
+            ARCH=${PARTS[1]}
+            VARIANT=${PARTS[2]:-}
 
+            NAME="${BIN}-${OS}-${ARCH}"
+            export GOOS=$OS GOARCH=$ARCH
+            unset GOARM GOMIPS
+            if [ "$ARCH" = "arm" ] && [ -n "$VARIANT" ]; then
+              export GOARM=$VARIANT
+              NAME="${NAME}v${VARIANT}"
+            fi
+            if [ "$ARCH" = "mipsle" ] || [ "$ARCH" = "mips" ]; then
+              export GOMIPS=$VARIANT
+            fi
+            if [ "$OS" = "windows" ]; then
+              NAME="${NAME}.exe"
+            fi
+
+            echo "Building $NAME"
+            go build -ldflags="-s -w -X yggspeedtest/internal/engine.Version=$VERSION" \
+              -o "dist/${NAME}" "./cmd/${BIN}" || exit 1
+          done
+
+      - name: Package
+        env:
+          BIN: ${{ matrix.bin }}
+        run: |
           cd dist
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            zip -r "../${BINARY_NAME}.zip" *
-          else
-            tar -czvf "../${BINARY_NAME}.tar.gz" *
-          fi
+          tar -czvf "../${BIN}-linux.tar.gz" "${BIN}"-linux-*
+          tar -czvf "../${BIN}-darwin.tar.gz" "${BIN}"-darwin-*
+          zip -r "../${BIN}-windows.zip" "${BIN}"-windows-*
           cd ..
+          ls -l *.tar.gz *.zip
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: yggspeedtest-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goarm && format('v{0}', matrix.goarm) || '' }}
+          name: ${{ matrix.bin }}
           path: |
-            *.tar.gz
-            *.zip
+            ${BIN}-linux.tar.gz
+            ${BIN}-darwin.tar.gz
+            ${BIN}-windows.zip
+          if-no-files-found: error
 
   release:
     name: Create GitHub Release

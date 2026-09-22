@@ -111,4 +111,3 @@ func (s *YggdrasilNetstack) Close() {
 		s.stack.Close()
 	}
 }
-

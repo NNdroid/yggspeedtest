@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YggSpeedTest</title>
+<style>
+  :root{
+    --bg:#0f1216; --panel:#171c22; --panel2:#1e242c; --line:#2a323d;
+    --fg:#e6edf3; --muted:#8b98a5; --accent:#3fb950; --accent2:#2f81f7;
+    --warn:#d29922; --err:#f85149; --chip:#222a33;
+    --mono:ui-monospace,SFMono-Regular,"Cascadia Mono",Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--bg);color:var(--fg);
+    font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--accent2);text-decoration:none}
+  .wrap{max-width:1180px;margin:0 auto;padding:18px 16px 64px}
+
+  header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:18px}
+  h1{font-size:19px;margin:0;letter-spacing:.2px;display:flex;align-items:center;gap:9px}
+  h1 .dot{width:10px;height:10px;border-radius:50%;background:var(--accent);box-shadow:0 0 8px var(--accent)}
+  .sub{color:var(--muted);font-size:12px;font-family:var(--mono)}
+  .spacer{flex:1}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-bottom:14px}
+  .card>h2{
+    font-size:12px;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);
+    margin:0;padding:11px 14px;border-bottom:1px solid var(--line);font-weight:600;
+    display:flex;align-items:center;gap:8px;
+  }
+  .card>.body{padding:14px}
+
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .grow{flex:1;min-width:180px}
+
+  button{
+    background:var(--panel2);color:var(--fg);border:1px solid var(--line);
+    border-radius:8px;padding:8px 14px;font:inherit;cursor:pointer;transition:.12s;
+  }
+  button:hover:not(:disabled){border-color:#3d4753;background:#252d37}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .primary{background:var(--accent);border-color:var(--accent);color:#06120a;font-weight:600}
+  .primary:hover:not(:disabled){background:#4ac760;border-color:#4ac760}
+  .danger{border-color:#4a2226;color:var(--err)}
+  .danger:hover:not(:disabled){background:#2a1518}
+  .sm{padding:4px 9px;font-size:12px;border-radius:6px}
+
+  label{display:block;font-size:12px;color:var(--muted);margin:0 0 4px}
+  input,textarea,select{
+    width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--line);
+    border-radius:8px;padding:8px 10px;font:inherit;
+  }
+  input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent2)}
+  textarea{font-family:var(--mono);font-size:12.5px;resize:vertical;line-height:1.6}
+  .grid{display:grid;gap:11px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+  .grid2{grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}
+
+  .chip{display:inline-flex;align-items:center;gap:6px;background:var(--chip);border:1px solid var(--line);
+    border-radius:999px;padding:3px 10px;font-size:11.5px;font-family:var(--mono);color:var(--muted)}
+  .chip b{color:var(--fg);font-weight:600}
+  .ok{color:var(--accent)} .bad{color:var(--err)} .warn{color:var(--warn)} .muted{color:var(--muted)}
+
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{padding:7px 9px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
+  th{color:var(--muted);font-weight:600;font-size:11.5px;text-transform:uppercase;letter-spacing:.05em}
+  td.num,th.num{text-align:right;font-family:var(--mono)}
+  td.peer{font-family:var(--mono);font-size:12px;max-width:250px;overflow:hidden;text-overflow:ellipsis}
+  tr.cur{background:#131b23}
+  tbody tr:hover{background:#1a2129}
+
+  .empty{color:var(--muted);padding:22px 0;text-align:center;font-size:13px}
+  .toast{
+    position:fixed;bottom:18px;left:50%;transform:translateX(-50%) translateY(80px);
+    background:var(--panel2);border:1px solid var(--line);border-radius:9px;
+    padding:10px 16px;font-size:13px;box-shadow:0 8px 26px #0009;transition:.22s;z-index:9;max-width:80vw;
+  }
+  .toast.show{transform:translateX(-50%) translateY(0)}
+  .toast.bad{border-color:#5c2b30} .toast.ok{border-color:#2b5c38}
+
+  .spin{display:inline-block;width:12px;height:12px;border:2px solid #3d4753;border-top-color:var(--accent);
+    border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px;margin-right:6px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+
+  canvas{width:100%;height:190px;display:block}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted);padding:8px 0 0}
+  .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px}
+
+  details>summary{cursor:pointer;color:var(--muted);font-size:12px;padding:4px 0;user-select:none}
+  details>summary:hover{color:var(--fg)}
+  .switch{position:relative;width:38px;height:21px;flex:none}
+  .switch input{opacity:0;width:0;height:0}
+  .slider{position:absolute;inset:0;background:var(--chip);border:1px solid var(--line);border-radius:999px;transition:.15s}
+  .slider:before{content:"";position:absolute;width:13px;height:13px;left:3px;top:3px;background:var(--muted);border-radius:50%;transition:.15s}
+  .switch input:checked+.slider{background:#1b3a26;border-color:#2b5c38}
+  .switch input:checked+.slider:before{background:var(--accent);transform:translateX(17px)}
+  .kv{display:flex;gap:16px;flex-wrap:wrap;font-size:12.5px;color:var(--muted);font-family:var(--mono)}
+  .kv b{color:var(--fg)}
+  .hint{font-size:12px;color:var(--muted);margin-top:7px;line-height:1.6}
+  code{font-family:var(--mono);font-size:12px;background:var(--chip);padding:1px 5px;border-radius:4px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1><span class="dot" id="liveDot"></span>YggSpeedTest</h1>
+  <span class="sub" id="verLbl">加载中…</span>
+  <div class="spacer"></div>
+  <span class="chip" id="stChip"><span class="spin" style="display:none" id="spin1"></span><span id="stText">空闲</span></span>
+  <button class="primary" id="btnRun">立即测速</button>
+  <button class="danger" id="btnCancel" style="display:none">中止</button>
+</header>
+
+<div class="card">
+  <h2>定时任务</h2>
+  <div class="body">
+    <div class="row">
+      <div class="grow">
+        <label for="fSchedule">cron 表达式（支持 5 段 cron 与 @every / @daily / @hourly）</label>
+        <input id="fSchedule" placeholder="@every 1h" spellcheck="false">
+      </div>
+      <div style="padding-top:19px">
+        <div class="switch"><input type="checkbox" id="fEnabled"><span class="slider"></span></div>
+      </div>
+      <button id="btnSave">保存配置</button>
+    </div>
+    <div class="row" style="margin-top:11px;gap:8px" id="schedInfo"></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>最近结果</h2>
+  <div class="body">
+    <canvas id="chart" height="190"></canvas>
+    <div class="legend"><span><i style="background:#3fb950"></i>平均速率</span>
+      <span><i style="background:#2f81f7"></i>峰值速率</span>
+      <span><i style="background:#d29922"></i>平均 Ping</span></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>运行记录 <span class="spacer"></span><span id="runCount" class="muted"></span></h2>
+  <div class="body" style="padding:0">
+    <div id="runList"></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>本次进度</h2>
+  <div class="body" style="padding:0">
+    <div id="progList"></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>测速参数 <button class="sm" id="btnToggle" style="margin-left:auto">折叠</button></h2>
+  <div class="body" id="cfgBody"></div>
+</div>
+
+<div class="hint" style="margin-top:14px">
+  配置与历史保存在 <code id="dataDir">…</code>，可直接编辑后重启服务。
+  所有请求都走本机，未加载任何外部脚本。
+</div>
+
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const API = '';
+let cfg = null, runs = [], evt = null, evtOpen = false, busy = false, currentRun = '';
+
+/* ---------- small helpers ---------- */
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g,
+  (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtDur = (ms) => {
+  if (ms == null) return '—';
+  if (ms < 1000) return ms + 'ms';
+  if (ms < 60000) return (ms/1000).toFixed(1) + 's';
+  return Math.floor(ms/60000) + 'm' + String(Math.floor(ms%60000/1000)).padStart(2,'0') + 's';
+};
+const fmtTime = (t) => {
+  if (!t) return '—';
+  const d = new Date(t);
+  return d.toLocaleString('zh-CN', {hour12:false});
+};
+const num = (v, n=3) => v == null || isNaN(v) ? '—' : Number(v).toFixed(n);
+let toastT;
+function toast(msg, kind){
+  const el = $('toast');
+  el.textContent = msg;
+  el.className = 'toast show' + (kind ? ' ' + kind : '');
+  clearTimeout(toastT);
+  toastT = setTimeout(() => el.className = 'toast', 3600);
+}
+async function req(path, opts){
+  const r = await fetch(API + path, opts);
+  let body = null;
+  try { body = await r.json(); } catch(e) {}
+  if (!r.ok) throw new Error((body && body.error) || (r.status + ' ' + r.statusText));
+  return body;
+}
+
+/* ---------- config form ---------- */
+const FIELDS = [
+  ['peer', 'Peer 列表（每行一个）', 'textarea'],
+  ['test_url', '测速 URL', 'text'],
+  ['custom_host', '自定义 Host', 'text'],
+  ['custom_sni', '自定义 SNI', 'text'],
+  ['custom_dns', '自定义 DNS', 'text'],
+  ['peer_file', 'Peer 文件路径', 'text'],
+  ['key_file', '节点 Key 文件', 'text'],
+  ['concurrency', '并发数', 'number'],
+  ['streams', '下载并发流', 'number'],
+  ['limit', 'Peer 数量上限', 'number'],
+  ['max_duration', '单次最长时长', 'text'],
+  ['max_bytes', '单次最大下载', 'text'],
+  ['timeout', '握手超时', 'text'],
+  ['route_timeout', '路由超时', 'text'],
+  ['sort', '排序方式', 'select'],
+  ['min_speed', '最低速率 Mbps', 'number'],
+  ['max_ping', '最大 Ping ms', 'number'],
+  ['listen_addr', '监听地址', 'text'],
+  ['history_limit', '历史保留条数', 'number'],
+  ['data_dir', '数据目录', 'text'],
+  ['public_peers', '拉取公共 Peer', 'check'],
+  ['debug', '调试日志', 'check'],
+];
+function buildForm(){
+  const body = $('cfgBody');
+  body.innerHTML = '<div class="grid grid2">' + FIELDS.map(([k, label, type]) => {
+    if (type === 'check') {
+      return `<div><label><input type="checkbox" data-k="${k}" style="width:auto;margin-right:6px">
+        ${esc(label)}</label></div>`;
+    }
+    if (type === 'textarea') {
+      return `<div style="grid-column:1/-1"><label for="f_${k}">${esc(label)}</label>
+        <textarea id="f_${k}" data-k="${k}" rows="4" spellcheck="false"></textarea></div>`;
+    }
+    if (type === 'select') {
+      const opts = ['speed','peak','ping','handshake'].map(o =>
+        `<option value="${o}">${o}</option>`).join('');
+      return `<div><label for="f_${k}">${esc(label)}</label>
+        <select id="f_${k}" data-k="${k}">${opts}</select></div>`;
+    }
+    return `<div><label for="f_${k}">${esc(label)}</label>
+      <input id="f_${k}" data-k="${k}" type="${type}" spellcheck="false"></div>`;
+  }).join('') + '</div>';
+}
+function readForm(){
+  const out = {};
+  for (const el of document.querySelectorAll('[data-k]')) {
+    const k = el.dataset.k;
+    if (el.type === 'checkbox') out[k] = el.checked;
+    else if (el.type === 'number') out[k] = el.value === '' ? 0 : Number(el.value);
+    else out[k] = el.value;
+  }
+  const peer = out.peer;
+  delete out.peer;
+  out.peer = peer === '' ? [] : peer.split('\n').map(s => s.trim()).filter(Boolean);
+  return out;
+}
+function paintForm(){
+  if (!cfg) return;
+  for (const el of document.querySelectorAll('[data-k]')) {
+    const k = el.dataset.k;
+    if (el.type === 'checkbox') el.checked = !!cfg[k];
+    else if (el.type === 'select') el.value = cfg[k] || 'speed';
+    else {
+      const v = cfg[k];
+      el.value = Array.isArray(v) ? v.join('\n') : (v == null ? '' : v);
+    }
+  }
+  $('fSchedule').value = cfg.schedule || '';
+  $('fEnabled').checked = !!cfg.enabled;
+}
+
+/* ---------- status ---------- */
+async function refreshStatus(){
+  let st;
+  try { st = await req('/api/status'); } catch(e) {
+    $('verLbl').textContent = '服务离线';
+    $('liveDot').style.background = 'var(--err)';
+    return;
+  }
+  $('verLbl').textContent = st.version + ' · ' + st.listen_addr;
+  $('dataDir').textContent = st.data_dir || '当前目录';
+  busy = !!st.running;
+  currentRun = st.current_run || '';
+  $('liveDot').style.background = busy ? 'var(--warn)' : 'var(--accent)';
+  $('btnRun').disabled = busy;
+  $('btnRun').textContent = busy ? '测试中…' : '立即测速';
+  // The cancel button is only actionable while a run is in flight: after it
+  // ends the server answers 404, which would toast a scary error for nothing.
+  $('btnCancel').style.display = (busy && currentRun) ? '' : 'none';
+  $('stText').textContent = busy ? ('运行中 ' + currentRun) : '空闲';
+
+  const s = st.schedule || {};
+  $('schedInfo').innerHTML = [
+    chip('启用', s.enabled ? '是' : '否', s.enabled ? 'ok' : 'muted'),
+    s.expression ? chip('计划', s.expression) : '',
+    s.next ? chip('下次', new Date(s.next).toLocaleString('zh-CN',{hour12:false})) : '',
+    s.last_run ? chip('上次', new Date(s.last_run).toLocaleString('zh-CN',{hour12:false})) : '',
+    chip('已运行', String(s.runs || 0)),
+    (s.skipped ? chip('跳过', String(s.skipped), 'warn') : ''),
+    s.error ? chip('错误', s.error, 'bad') : '',
+    !s.valid && (cfg && cfg.schedule) ? chip('表达式无效', 'bad') : '',
+  ].filter(Boolean).join(' ');
+}
+const chip = (k, v, cls='') =>
+  `<span class="chip">${esc(k)} <b class="${cls}">${esc(v)}</b></span>`;
+
+// A run that was aborted reports "cancelled" ahead of whatever the in-flight
+// dial was doing, and those should be spotable in the history list without
+// opening the detail view.
+const runFlag = (r) => !r.error ? ''
+  : /^cancelled/.test(r.error)
+    ? `<span class="chip" style="border-color:var(--warn);color:var(--warn)">已中止</span>`
+    : `<span class="chip" title="${esc(r.error)}"><b class="bad">失败</b></span>`;
+
+/* ---------- runs ---------- */
+async function refreshRuns(){
+  try { runs = await req('/api/runs'); } catch(e) { return; }
+  $('runCount').textContent = runs.length ? runs.length + ' 条' : '';
+  const box = $('runList');
+  if (!runs.length) {
+    box.innerHTML = '<div class="empty">还没有运行记录。点右上角「立即测速」开始。</div>';
+    drawChart([]);
+    return;
+  }
+  const asc = runs.slice().reverse();
+  box.innerHTML = `<table><thead><tr>
+      <th>时间</th><th>来源</th><th class="num">平均</th><th class="num">峰值</th>
+      <th class="num">Ping</th><th class="num">Peer</th><th class="num">耗时</th><th></th>
+    </tr></thead><tbody>` + asc.map(r => `<tr>
+      <td>${esc(fmtTime(r.started_at))}</td>
+      <td>${r.trigger === 'scheduled' ? '<span class="chip">定时</span>' : '<span class="chip">手动</span>'}${runFlag(r) ? ' ' + runFlag(r) : ''}</td>
+      <td class="num ok">${num(r.avg_mbps)}</td>
+      <td class="num">${num(r.max_mbps)}</td>
+      <td class="num">${num(r.avg_ping_ms, 1)}</td>
+      <td class="num">${r.peers}</td>
+      <td class="num">${esc(fmtDur(r.duration_ms))}</td>
+      <td style="text-align:right">
+        <a href="#" data-open="${esc(r.id)}">明细</a>
+        <a class="muted" href="${API}/api/runs/${esc(r.id)}/csv" download>CSV</a>
+        <a href="#" class="bad" data-del="${esc(r.id)}">删除</a>
+      </td></tr>`).join('') + '</tbody></table>';
+
+  box.querySelectorAll('[data-open]').forEach(a => a.onclick = (e) => {
+    e.preventDefault(); openRun(a.dataset.open);
+  });
+  box.querySelectorAll('[data-del]').forEach(a => a.onclick = async (e) => {
+    e.preventDefault();
+    if (!confirm('删除这条运行记录？')) return;
+    try { await req('/api/runs/' + a.dataset.del, {method:'DELETE'}); toast('已删除', 'ok'); refresh(); }
+    catch(err) { toast('删除失败：' + err.message, 'bad'); }
+  });
+
+  // The chart shows the newest run that produced peer-level numbers. Newest-first
+  // and skipping numberless runs both matter: a failure-only run draws nothing but
+  // the grid, which beside a table full of Mbps reads as a broken chart.
+  const last = asc.slice(-40);
+  let drew = false;
+  for (let i = last.length - 1; i >= 0 && !drew; i--) {
+    try {
+      const full = await req('/api/runs/' + last[i].id);
+      const peers = (full.results || []).map(p => ({
+        label: shortPeer(p.peer),
+        avg: p.download_mbps == null ? null : Number(p.download_mbps),
+        peak: p.peak_mbps == null ? null : Number(p.peak_mbps),
+        ping: p.ping_ms == null ? null : Number(p.ping_ms),
+        err: !!p.error,
+      }));
+      if (!peers.some(p => p.avg != null || p.peak != null || p.ping != null)) continue;
+      drawChart(peers, full.started_at);
+      drew = true;
+    } catch(e) { /* try the next run */ }
+  }
+  if (!drew) drawChart([]);
+}
+function shortPeer(p){
+  if (!p) return '';
+  const m = String(p).match(/:\/\/([^:/?]+)/);
+  return m ? m[1] : String(p);
+}
+
+async function openRun(id){
+  let full;
+  try { full = await req('/api/runs/' + id); }
+  catch(e) { return toast('读取失败：' + e.message, 'bad'); }
+  const box = $('progList');
+  const rs = full.results || [];
+  if (!rs.length) {
+    box.innerHTML = `<div class="empty">${esc(full.error || '本次没有产生结果')}</div>`;
+    return;
+  }
+  box.innerHTML = `<table><thead><tr>
+      <th>#</th><th>Peer</th><th class="num">平均</th><th class="num">峰值</th>
+      <th class="num">握手</th><th class="num">Ping</th><th class="num">下载</th>
+      <th class="num">耗时</th><th>状态</th>
+    </tr></thead><tbody>` + rs.map((r, i) => {
+      const mb = r.bytes_download && r.bytes_download > 0
+        ? (r.bytes_download / 1048576).toFixed(2) + ' MB' : '—';
+      return `<tr>
+        <td class="muted">${i + 1}</td>
+        <td class="peer" title="${esc(r.peer)}">${esc(r.peer || '—')}</td>
+        <td class="num ${r.download_mbps != null ? 'ok' : ''}">${num(r.download_mbps)}</td>
+        <td class="num">${num(r.peak_mbps)}</td>
+        <td class="num">${num(r.handshake_ms, 1)}</td>
+        <td class="num">${num(r.ping_ms, 1)}</td>
+        <td class="num">${esc(mb)}</td>
+        <td class="num">${num(r.duration_sec, 2)}</td>
+        <td>${r.error ? `<span class="bad">${esc(r.error)}</span>` : '<span class="ok">✓ 成功</span>'}</td>
+      </tr>`;
+    }).join('') + '</tbody></table>';
+  box.scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
+/* ---------- chart ---------- */
+// Remembers the series that was last painted. The canvas is also redrawn on
+// window resize, which arrives with no arguments — without this it would wipe a
+// correct chart back to the empty state whenever the pane was resized.
+let chartPeers = [], chartLabel = '';
+function redrawChart(){ drawChart(chartPeers, chartLabel); }
+function drawChart(peers, label){
+  chartPeers = peers || [];
+  chartLabel = label || '';
+  const cv = $('chart');
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = 190;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+
+  if (!peers || !peers.length) {
+    g.fillStyle = '#8b98a5'; g.font = '13px sans-serif'; g.textAlign = 'center';
+    g.fillText('暂无数据', w / 2, h / 2);
+    return;
+  }
+
+  const padL = 46, padR = 46, padT = 14, padB = 26;
+  const iw = w - padL - padR, ih = h - padT - padB;
+  const mbps = peers.filter(p => p.avg != null).map(p => p.avg);
+  const pings = peers.filter(p => p.ping != null).map(p => p.ping);
+  const yMax = Math.max(1, ...peers.map(p => p.peak ?? p.avg ?? 0)) * 1.15;
+  const pMax = Math.max(1, ...pings) * 1.15;
+
+  // grid
+  g.strokeStyle = '#2a323d'; g.lineWidth = 1; g.font = '10px ui-monospace,monospace';
+  for (let i = 0; i <= 4; i++) {
+    const y = padT + ih * i / 4;
+    g.beginPath(); g.moveTo(padL, y); g.lineTo(w - padR, y); g.stroke();
+    g.fillStyle = '#6e7b88'; g.textAlign = 'right';
+    g.fillText((yMax * (1 - i / 4)).toFixed(0), padL - 6, y + 3);
+    g.textAlign = 'left';
+    g.fillText((pMax * (1 - i / 4)).toFixed(0), w - padR + 6, y + 3);
+  }
+
+  const n = peers.length;
+  const bw = Math.max(2, Math.min(22, iw / n / 2 - 2));
+  const step = iw / n;
+
+  peers.forEach((p, i) => {
+    const x = padL + step * i + step / 2;
+    if (p.avg != null) {
+      g.fillStyle = p.err ? '#f85149' : '#3fb950';
+      bar(x - bw, p.avg / yMax, bw, ih);
+    }
+    if (p.peak != null) {
+      g.fillStyle = '#2f81f7';
+      g.globalAlpha = .55;
+      bar(x, p.peak / yMax, bw, ih);
+      g.globalAlpha = 1;
+    }
+    if (p.ping != null) {
+      g.strokeStyle = '#d29922';
+      dot(x, p.ping / pMax);
+    }
+  });
+
+  function bar(x, frac, wdt, ihgt) {
+    const bh = Math.max(1, ihgt * Math.min(1, frac));
+    g.fillRect(x, padT + ihgt - bh, wdt, bh);
+  }
+  function dot(x, frac) {
+    const y = padT + ih * (1 - Math.min(1, frac));
+    g.beginPath(); g.arc(x, y, 2.6, 0, 6.2832); g.fillStyle = '#d29922'; g.fill();
+  }
+
+  // axis labels
+  g.fillStyle = '#6e7b88'; g.font = '10px ui-monospace,monospace'; g.textAlign = 'center';
+  const every = Math.ceil(n / 12);
+  peers.forEach((p, i) => {
+    if (i % every !== 0 && i !== n - 1) return;
+    const x = padL + step * i + step / 2;
+    const t = p.label || String(i + 1);
+    g.save(); g.translate(x, h - 8); g.rotate(-0.5);
+    g.fillText(t.length > 14 ? t.slice(0, 13) + '…' : t, 0, 0);
+    g.restore();
+  });
+}
+
+/* ---------- SSE ---------- */
+function connect(){
+  if (evt) { try { evt.close(); } catch(e) {} }
+  evt = new EventSource(API + '/api/events');
+  evt.onopen = () => { evtOpen = true; };
+  evt.onmessage = (m) => { if (m.data === 'ping') return; };
+  evt.addEventListener('hello', (m) => { refreshStatus(); });
+  evt.addEventListener('run_started', (m) => {
+    const d = JSON.parse(m.data);
+    $('progList').innerHTML = `<div class="empty"><span class="spin"></span>运行 ${esc(d.id)} 进行中…</div>`;
+    refresh();
+  });
+  evt.addEventListener('peer_done', (m) => {
+    const d = JSON.parse(m.data);
+    const r = d.result;
+    const box = $('progList');
+    if (!box.dataset.head) {
+      box.innerHTML = `<table><thead><tr><th>Peer</th><th class="num">平均</th>
+        <th class="num">峰值</th><th class="num">Ping</th><th>状态</th></tr></thead>
+        <tbody id="progBody"></tbody></table>`;
+      box.dataset.head = '1';
+    }
+    const body = $('progBody');
+    const tr = document.createElement('tr');
+    tr.className = 'cur';
+    tr.innerHTML = `<td class="peer" title="${esc(r.peer)}">${esc(r.peer || '—')}</td>
+      <td class="num ${r.download_mbps != null ? 'ok' : ''}">${num(r.download_mbps)}</td>
+      <td class="num">${num(r.peak_mbps)}</td>
+      <td class="num">${num(r.ping_ms, 1)}</td>
+      <td>${r.error ? `<span class="bad">${esc(r.error)}</span>` : '<span class="ok">✓</span>'}</td>`;
+    body.prepend(tr);
+    setTimeout(() => { body.querySelectorAll('tr.cur').forEach(t => t.classList.remove('cur')); }, 1400);
+  });
+  evt.addEventListener('run_finished', (m) => {
+    const d = JSON.parse(m.data);
+    // Aborting a run is not the same as a run failing, so it gets its own
+    // wording instead of reading as a fault.
+    const aborted = !!d.error && /^cancelled/.test(d.error);
+    const txt = aborted
+      ? ('已中止：' + d.error.replace(/^cancelled:?\s*/, ''))
+      : d.error
+        ? ('完成（错误）' + d.error)
+        : `完成：${d.peers} 个 peer，平均 ${num(d.avg_mbps)} Mbps，峰值 ${num(d.max_mbps)} Mbps`;
+    toast(txt, aborted ? 'warn' : (d.error ? 'bad' : 'ok'));
+    setTimeout(() => { $('progList').dataset.head = ''; }, 2000);
+    refresh();
+  });
+  // Another tab (or the API) may have changed settings; re-pull them so this
+  // form stops advertising a plan the server no longer runs.
+  evt.addEventListener('schedule', () => { refreshStatus(); loadConfig(); });
+  evt.onerror = () => {
+    evtOpen = false;
+    $('liveDot').style.background = 'var(--muted)';
+    setTimeout(connect, 3000);
+  };
+}
+
+/* ---------- wiring ---------- */
+async function refresh(){
+  await Promise.all([refreshStatus(), refreshRuns()]);
+}
+// loadConfig pulls the persisted settings into cfg, which paintForm renders.
+// Without it cfg stays null, paintForm no-ops, and the form shows blank HTML
+// defaults while the status chips show live values. Saving in that state would
+// round-trip those blanks back to the server and wipe the operator's config.
+async function loadConfig(){
+  try { cfg = await req('/api/config'); } catch(e) { cfg = null; }
+  paintForm();
+}
+async function save(){
+  const next = readForm();
+  next.schedule = $('fSchedule').value.trim();
+  next.enabled = $('fEnabled').checked;
+  try {
+    cfg = await req('/api/config', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(next),
+    });
+    toast('配置已保存', 'ok');
+    paintForm();   // the server normalises blanks to defaults, so re-read it
+    await refresh();
+  } catch(e) { toast('保存失败：' + e.message, 'bad'); }
+}
+async function go(){
+  if (busy) return;
+  $('btnRun').disabled = true;
+  try {
+    const body = readForm();
+    await req('/api/run', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({peer: body.peer}),
+    });
+    toast('已启动，等待结果…', 'ok');
+    await refreshStatus();
+  } catch(e) { toast('启动失败：' + e.message, 'bad'); await refreshStatus(); }
+}
+async function abortRun(){
+  if (!busy || !currentRun) return;
+  try {
+    await req('/api/runs/' + currentRun + '/cancel', {method:'POST'});
+    toast('已请求中止，等待收尾…', 'ok');
+  } catch(e) { toast('中止失败：' + e.message, 'bad'); }
+  await refresh();
+}
+
+buildForm();
+$('btnRun').onclick = go;
+$('btnCancel').onclick = abortRun;
+$('btnSave').onclick = save;
+$('btnToggle').onclick = () => {
+  const b = $('cfgBody');
+  const hidden = b.style.display === 'none';
+  b.style.display = hidden ? '' : 'none';
+  $('btnToggle').textContent = hidden ? '折叠' : '展开';
+};
+window.addEventListener('resize', () => redrawChart());
+// Config must load before the form is painted: cfg starts null, and a
+// null-backed form paints blanks while the status chips show live values. Left
+// alone that mismatch reads as "the schedule is 1h" when it is 1m, and saving
+// it would push those blanks back to the server and wipe the real settings.
+Promise.all([loadConfig(), refresh()]);
+connect();
+setInterval(() => { if (evtOpen) refreshStatus(); }, 20000);
+</script>
+</body>
+</html>
