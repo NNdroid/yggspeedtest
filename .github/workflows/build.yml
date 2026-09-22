@@ -117,13 +117,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.bin }}
-          # A workflow expression, not ${BIN}: inside a `uses:` block the
-          # path is matched literally by the action, so a shell variable from
-          # an earlier step never expands here and the upload finds no files.
+          # Wildcards, not names built from ${BIN} or ${{ matrix.bin }}: the
+          # Package step ran in the same workspace and wrote exactly these
+          # three archives for this matrix entry, so no expression has to be
+          # expanded inside a uses: block for the upload to find them.
           path: |
-            ${{ matrix.bin }}-linux.tar.gz
-            ${{ matrix.bin }}-darwin.tar.gz
-            ${{ matrix.bin }}-windows.zip
+            *.tar.gz
+            *.zip
           if-no-files-found: error
 
   release:
