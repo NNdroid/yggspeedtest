@@ -49,13 +49,20 @@ func runDownloadTestMultiStream(
 
 	client := &http.Client{
 		Transport: transport,
-		// The context already bounds the run; a hard client timeout is what
-		// lets one hung stream fail instead of holding the WaitGroup open.
-		Timeout: maxDuration + 5*time.Second,
 	}
-
-	downloadCtx, cancel := context.WithTimeout(ctx, maxDuration)
-	defer cancel()
+	// maxDuration == 0 means unlimited and must stay unlimited: the previous
+	// code always installed a context deadline, so a zero duration expired at
+	// once and "unlimited" runs failed every peer with "timed out after 0s".
+	// A hard client timeout is still what lets one hung stream fail instead of
+	// holding the WaitGroup open, so it is only skipped when there is no bound
+	// at all. The no-op cancel keeps the maxBytes stop below uniform.
+	downloadCtx := ctx
+	cancel := context.CancelFunc(func() {})
+	if maxDuration > 0 {
+		client.Timeout = maxDuration + 5*time.Second
+		downloadCtx, cancel = context.WithTimeout(ctx, maxDuration)
+		defer cancel()
+	}
 
 	var downloadedAtomic int64
 	var peakBits uint64

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -74,6 +75,12 @@ type Server struct {
 	enabled   bool
 
 	storeMu sync.Mutex // serialises access to the config and runs files
+
+	// shutdownCh is closed by Cancel. The SSE handlers watch it: without it,
+	// Server.Shutdown in the main would wait out its whole timeout on every
+	// open dashboard tab, because an event stream never ends on its own.
+	shutdownCh   chan struct{}
+	shutdownOnce sync.Once
 }
 
 // Option tunes a Server before Run.
@@ -90,6 +97,7 @@ func New(cfg store.Config, paths Paths, listenAddr string, opts ...Option) (*Ser
 		cfg:        cfg,
 		runCtx:     runCtx,
 		cancelRun:  cancelRun,
+		shutdownCh: make(chan struct{}),
 	}
 	for _, o := range opts {
 		o(s)
@@ -98,9 +106,11 @@ func New(cfg store.Config, paths Paths, listenAddr string, opts ...Option) (*Ser
 	return s, nil
 }
 
-// Cancel stops the scheduler and asks every in-flight run to stop. It does not
-// wait for the run to finish; a bounded batch unwinds on its own.
+// Cancel stops the scheduler and asks every in-flight run to stop, then
+// releases the event streams so an HTTP shutdown is not stuck waiting on them.
+// It does not wait for the run to finish; a bounded batch unwinds on its own.
 func (s *Server) Cancel() {
+	s.shutdownOnce.Do(func() { close(s.shutdownCh) })
 	s.cancelRun()
 }
 
@@ -136,16 +146,22 @@ func (s *Server) SetConfig(cfg store.Config) error {
 		}
 	}
 
+	// The save and the in-memory swap happen under one lock acquisition, so
+	// two concurrent saves cannot leave the file holding one config while the
+	// process runs with another.
 	s.storeMu.Lock()
 	if err := cfg.Save(s.paths.Config); err != nil {
 		s.storeMu.Unlock()
 		return err
 	}
-	s.storeMu.Unlock()
-
 	s.cfgMu.Lock()
 	s.cfg = cfg
 	s.cfgMu.Unlock()
+	s.storeMu.Unlock()
+
+	// The debug switch is applied to the running process, not just stored:
+	// the UI toggle would otherwise be a write-only setting.
+	engine.SetDebug(cfg.Debug)
 
 	s.reconcileScheduler()
 	s.broadcast("schedule", s.scheduleStatus())
@@ -249,11 +265,39 @@ func (s *Server) startRun(trigger string, ctx context.Context, peers []string) (
 	s.jobMu.Unlock()
 
 	done := make(chan struct{})
+	started := time.Now()
+
+	// finish is idempotent: the panic guard below must not append a second
+	// record when execute had already persisted one before unwinding.
+	finished := &atomic.Bool{}
+	finish := func(rec store.RunRecord) {
+		if finished.Swap(true) {
+			return
+		}
+		s.finish(rec)
+	}
+
 	go func() {
 		defer close(done)
 		defer runCancel()
 		defer s.releaseRun()
-		s.execute(id, trigger, runCtx, peers)
+		defer func() {
+			if r := recover(); r != nil {
+				// A panic inside one measurement must not take the whole
+				// server down; the run still leaves a visible, failed record.
+				engine.LogError("Run panicked and was aborted",
+					zap.String("id", id), zap.Any("panic", r), zap.Stack("stack"))
+				finish(store.RunRecord{
+					ID:        id,
+					StartedAt: started,
+					Duration:  time.Since(started).Round(time.Millisecond),
+					Trigger:   trigger,
+					Error:     fmt.Sprintf("internal error: %v", r),
+					Results:   []engine.SpeedResult{},
+				})
+			}
+		}()
+		s.execute(id, trigger, runCtx, peers, started, finish)
 	}()
 	return id, done, nil
 }
@@ -309,10 +353,9 @@ func (s *Server) CancelRun(id string) bool {
 	return false
 }
 
-// execute is one batch, from parameters to a persisted run record.
-func (s *Server) execute(id, trigger string, ctx context.Context, peers []string) {
-	started := time.Now()
-
+// execute is one batch, from parameters to a persisted run record. finish is
+// supplied by the caller so the panic guard can share the once-only contract.
+func (s *Server) execute(id, trigger string, ctx context.Context, peers []string, started time.Time, finish func(store.RunRecord)) {
 	cfg := s.Config()
 	rc, err := cfg.ToRunConfig(peers)
 
@@ -328,7 +371,7 @@ func (s *Server) execute(id, trigger string, ctx context.Context, peers []string
 	failFast := func(reason string) {
 		rec.Error = reason
 		rec.Duration = time.Since(started).Round(time.Millisecond)
-		s.finish(rec)
+		finish(rec)
 	}
 
 	if err != nil {
@@ -362,7 +405,7 @@ func (s *Server) execute(id, trigger string, ctx context.Context, peers []string
 	rec.AvgMbps, rec.MaxMbps, rec.AvgPingMs = summarise(results)
 	rec.Duration = time.Since(started).Round(time.Millisecond)
 	rec.Results = results
-	s.finish(rec)
+	finish(rec)
 }
 
 // finish persists a run record and announces the outcome.
@@ -522,8 +565,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		StartedAt:  s.started,
 		Schedule:   s.scheduleStatus(),
 	}
-	if runs, err := store.LoadRuns(s.paths.Runs); err == nil {
-		status.Runs = len(runs)
+	if n, err := store.CountRuns(s.paths.Runs); err == nil {
+		status.Runs = n
 	}
 	writeJSON(w, http.StatusOK, status)
 }
@@ -549,8 +592,27 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Peers []string `json:"peer"`
 	}
-	// An empty or absent body is a valid request.
-	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body)
+	// An absent body is a valid "run the saved config" request, but a body
+	// that exists and does not parse is a client mistake: silently ignoring it
+	// would start a run with the saved peers when the caller asked for
+	// something else.
+	data, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "read body: "+err.Error())
+		return
+	}
+	if len(strings.TrimSpace(string(data))) > 0 {
+		if err := json.Unmarshal(data, &body); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		for _, p := range body.Peers {
+			if strings.TrimSpace(p) == "" {
+				writeError(w, http.StatusBadRequest, "peer list contains an empty entry")
+				return
+			}
+		}
+	}
 
 	// The run is a server-side job, not part of this request. Using the
 	// server's own context instead of r.Context() means a browser that closes
@@ -704,6 +766,10 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-s.shutdownCh:
+			// The server is going down: end the stream so http.Server.Shutdown
+			// is not left waiting out its timeout on every open dashboard tab.
 			return
 		case msg, ok := <-ch:
 			if !ok {

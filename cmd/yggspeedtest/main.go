@@ -34,7 +34,7 @@ func main() {
 	concurrency := flag.Int("c", 1, "Number of concurrent peer tests (if > 1, -key flag is ignored)")
 	streams := flag.Int("streams", 1, "Number of parallel HTTP download streams per peer test")
 
-	maxDurationStr := flag.String("max-duration", "10s", "Max download test duration per peer (e.g. 5s, 10s, 30s)")
+	maxDurationStr := flag.String("max-duration", "10s", "Max download test duration per peer (e.g. 5s, 10s, 30s; 0 = unlimited)")
 	maxBytesStr := flag.String("max-bytes", "", "Max bytes downloaded per peer (e.g. 10MB, 50MB, 100MB)")
 
 	timeoutStr := flag.String("timeout", "5s", "Pre-flight underlay handshake timeout")
@@ -67,25 +67,25 @@ func main() {
 
 	maxDuration, err := time.ParseDuration(*maxDurationStr)
 	if err != nil {
-		fatal(*outJSON, "Invalid -max-duration format", err, "")
+		fatal("Invalid -max-duration format", err)
 	}
 	if maxDuration < 0 {
-		fatal(*outJSON, "-max-duration must not be negative", nil, "")
+		fatal("-max-duration must not be negative", nil)
 	}
 
 	timeout, err := time.ParseDuration(*timeoutStr)
 	if err != nil {
-		fatal(*outJSON, "Invalid -timeout format", err, "")
+		fatal("Invalid -timeout format", err)
 	}
 
 	routeTimeout, err := time.ParseDuration(*routeTimeoutStr)
 	if err != nil {
-		fatal(*outJSON, "Invalid -route-timeout format", err, "")
+		fatal("Invalid -route-timeout format", err)
 	}
 
 	maxBytes, err := engine.ParseByteSize(*maxBytesStr)
 	if err != nil {
-		fatal(*outJSON, "Invalid -max-bytes format", err, "")
+		fatal("Invalid -max-bytes format", err)
 	}
 
 	cfg := engine.RunConfig{
@@ -121,7 +121,7 @@ func main() {
 
 	results, err := engine.Run(ctx, cfg)
 	if err != nil {
-		fatal(*outJSON, err.Error(), nil, "")
+		fatal(err.Error(), nil)
 	}
 	if ctx.Err() != nil {
 		engine.LogWarn("Run interrupted before completion",
@@ -153,34 +153,20 @@ func main() {
 		}
 	}
 
-	if *outJSON == "" {
-		engine.PrintConsoleTable(os.Stdout, results)
-	}
+	// The table always goes to the terminal; -out* only decides whether a file
+	// is written as well. Keying the table on -out alone made a JSON-only run
+	// print nothing while a CSV-only run printed the table.
+	engine.PrintConsoleTable(os.Stdout, results)
 }
 
-// fatal reports a configuration or run error and exits. When no JSON output
-// path was requested the error is printed as a result document on stdout, which
-// is the shape a script piping this tool can already handle.
-func fatal(outJSON, msg string, err error, peer string) {
+// fatal reports a configuration or run error and exits. Log output and any
+// piped stdout stay log-shaped: the old behaviour also printed a fake
+// SpeedResult JSON document to stdout, which mixed two formats in one stream.
+func fatal(msg string, err error) {
 	if err != nil {
 		engine.LogError("Fatal Error", zap.String("msg", msg), zap.Error(err))
 	} else {
 		engine.LogError("Fatal Error", zap.String("msg", msg))
-	}
-
-	errMsg := msg
-	if err != nil {
-		errMsg = fmt.Sprintf("%s: %v", msg, err)
-	}
-
-	if outJSON == "" {
-		res := engine.SpeedResult{
-			Peer:     peer,
-			TestTime: time.Now().Format(time.RFC3339),
-			Error:    errMsg,
-		}
-		out, _ := json.MarshalIndent([]engine.SpeedResult{res}, "", "  ")
-		fmt.Println(string(out))
 	}
 	os.Exit(1)
 }

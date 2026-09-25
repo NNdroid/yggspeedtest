@@ -539,3 +539,22 @@ func TestSchedulerSetSpecRepeatedKeepsFiring(t *testing.T) {
 		t.Error("the scheduler stopped firing after repeated SetSpec calls")
 	}
 }
+
+// A leap-day schedule just past Feb 29 has its next firing almost four years
+// away; a two-year scan window (as an earlier version used) would have
+// reported the expression as having no firing at all.
+func TestNextAfterLeapDayAcrossFourYears(t *testing.T) {
+	spec, err := Parse("0 0 29 2 *")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One minute after Feb 29, 2028; the next Feb 29 is in 2032.
+	start := time.Date(2028, 2, 29, 0, 1, 0, 0, time.UTC)
+	next, ok := spec.NextAfter(start)
+	if !ok {
+		t.Fatal("a leap-day schedule must still fire; the scan window is too short")
+	}
+	if want := time.Date(2032, 2, 29, 0, 0, 0, 0, time.UTC); !next.Equal(want) {
+		t.Errorf("next = %v, want %v", next, want)
+	}
+}

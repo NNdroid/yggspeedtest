@@ -44,9 +44,8 @@ type RunRecord struct {
 type Config struct {
 	// ListenAddr is the HTTP bind address.
 	ListenAddr string `json:"listen_addr"`
-	// DataDir is where config and runs live. Empty means the working directory.
-	DataDir string `json:"data_dir,omitempty"`
-	// HistoryLimit caps how many runs are retained. Zero means keep everything.
+	// HistoryLimit caps how many runs are retained. Zero means "use the
+	// default"; a negative number keeps every run.
 	HistoryLimit int `json:"history_limit,omitempty"`
 
 	Peers       []string `json:"peer,omitempty"`
@@ -82,15 +81,22 @@ type Config struct {
 
 // Load reads the persisted configuration. A missing or empty file yields a
 // default Config, which is what makes a first run work with no setup at all.
+// A file that exists but cannot be read is an error: silently substituting
+// defaults would start the server with someone else's idea of the config and
+// the next save would overwrite the real one.
 func Load(path string) (Config, error) {
 	var cfg Config
 	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) || len(data) == 0 {
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			cfg.fillDefaults()
+			return cfg, nil
+		}
+		return Config{}, fmt.Errorf("read config: %w", err)
+	}
+	if len(data) == 0 {
 		cfg.fillDefaults()
 		return cfg, nil
-	}
-	if err != nil {
-		return Config{}, fmt.Errorf("read config: %w", err)
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse config %s: %w", path, err)
@@ -115,12 +121,15 @@ func (cfg *Config) Normalise() { cfg.fillDefaults() }
 // fillDefaults leaves any zero field on its safe default. It is deliberately
 // lenient about values that Validate will still reject, so a half-edited file
 // loads and the user sees the specific complaint instead of a blank screen.
+//
+// TestURL is intentionally left empty: the built-in netstack can only download
+// from addresses inside the Yggdrasil range 200::/7, so there is no honest
+// default — the operator has to pick a target. A former cloudflare default
+// made every fresh install run a batch whose peers all failed with "network
+// is unreachable".
 func (cfg *Config) fillDefaults() {
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = "127.0.0.1:8080"
-	}
-	if cfg.TestURL == "" {
-		cfg.TestURL = "https://speed.cloudflare.com/__down?bytes=250000000"
 	}
 	if cfg.Concurrency < 1 {
 		cfg.Concurrency = 1
@@ -140,6 +149,12 @@ func (cfg *Config) fillDefaults() {
 	if cfg.SortBy == "" {
 		cfg.SortBy = "speed"
 	}
+	if cfg.HistoryLimit == 0 {
+		// Unbounded histories made every /api/status poll decode the whole
+		// runs file, and the file itself grew without end. 100 records is a
+		// usable window; -1 restores "keep everything".
+		cfg.HistoryLimit = 100
+	}
 }
 
 // ToRunConfig renders an engine.RunConfig for a batch, with the given number
@@ -156,9 +171,9 @@ func (cfg Config) ToRunConfig(overrides []string) (engine.RunConfig, error) {
 		CustomDNS:    cfg.CustomDNS,
 		Concurrency:  cfg.Concurrency,
 		Streams:      cfg.Streams,
-		MaxDuration:  parseDur(cfg.MaxDuration, "max_duration"),
-		Timeout:      parseDur(cfg.Timeout, "timeout"),
-		RouteTimeout: parseDur(cfg.RouteTimeout, "route_timeout"),
+		MaxDuration:  parseDur(cfg.MaxDuration),
+		Timeout:      parseDur(cfg.Timeout),
+		RouteTimeout: parseDur(cfg.RouteTimeout),
 		SortBy:       cfg.SortBy,
 		MinSpeed:     cfg.MinSpeed,
 		MaxPing:      cfg.MaxPing,
@@ -196,7 +211,7 @@ func (cfg Config) HasSchedule() bool { return cfg.Schedule != "" }
 
 // parseDur is the forgiving version used by ToRunConfig: it returns zero
 // instead of an error so the caller can report all three problems at once.
-func parseDur(value, field string) time.Duration {
+func parseDur(value string) time.Duration {
 	if value == "" {
 		return 0
 	}
@@ -242,7 +257,7 @@ func LoadRuns(path string) ([]RunRecord, error) {
 }
 
 // AppendRun adds one record and keeps at most limit records, dropping the
-// oldest. limit <= 0 keeps everything.
+// oldest. limit < 0 keeps everything.
 func AppendRun(path string, rec RunRecord, limit int) error {
 	runs, err := LoadRuns(path)
 	if err != nil {
@@ -279,6 +294,33 @@ func LatestRun(path string) (RunRecord, bool, error) {
 		return RunRecord{}, false, nil
 	}
 	return runs[len(runs)-1], true, nil
+}
+
+// CountRuns reports how many records the history file holds. It counts lines
+// instead of decoding them: /api/status only needs the number, and decoding
+// every record on each poll made the endpoint slow down as the history grew.
+func CountRuns(path string) (int, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read runs: %w", err)
+	}
+	if len(data) == 0 {
+		return 0, nil
+	}
+	n := 0
+	for _, b := range data {
+		if b == '\n' {
+			n++
+		}
+	}
+	// A trailing separator is not a record; a last line without one is.
+	if data[len(data)-1] != '\n' {
+		n++
+	}
+	return n, nil
 }
 
 // DeleteRun removes one run and reports whether it existed. The load and the

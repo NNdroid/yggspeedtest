@@ -172,11 +172,6 @@ func ExportCSVFile(filePath string, results []SpeedResult) error {
 	return ExportCSV(f, results)
 }
 
-// exportCSV is the package-internal file form used by the tests.
-func exportCSV(filePath string, results []SpeedResult) error {
-	return ExportCSVFile(filePath, results)
-}
-
 // ExportMarkdown writes a human-readable report.
 func ExportMarkdown(w io.Writer, results []SpeedResult) error {
 	var sb strings.Builder
@@ -198,11 +193,6 @@ func ExportMarkdown(w io.Writer, results []SpeedResult) error {
 // ExportMarkdownFile writes a Markdown report to a file path.
 func ExportMarkdownFile(filePath string, results []SpeedResult) error {
 	return os.WriteFile(filePath, []byte(RenderMarkdown(results)), 0644)
-}
-
-// exportMarkdown is the package-internal file form used by the tests.
-func exportMarkdown(filePath string, results []SpeedResult) error {
-	return ExportMarkdownFile(filePath, results)
 }
 
 // RenderMarkdown returns the report as text, for callers that cannot hand the
@@ -405,22 +395,12 @@ func PrintConsoleTable(w io.Writer, results []SpeedResult) {
 	fmt.Fprintln(w, rule)
 }
 
-// printConsoleTable writes the table to stdout, which is what the CLI wants.
-func printConsoleTable(results []SpeedResult) {
-	PrintConsoleTable(os.Stdout, results)
-}
-
-// RenderConsoleTable returns the table as text, for the web UI.
-func RenderConsoleTable(results []SpeedResult) string {
-	var sb strings.Builder
-	PrintConsoleTable(&sb, results)
-	return sb.String()
-}
-
-// speedCell renders a rate, or a placeholder when it was not measured.
+// speedCell renders a rate, or a placeholder when it was not measured. A
+// missing rate must not read as "0.000 Mbps", which would look like an
+// extremely fast measurement of nothing.
 func speedCell(s *SpeedFloat) string {
 	if s == nil {
-		return "0.000 Mbps"
+		return "-"
 	}
 	return fmt.Sprintf("%.3f Mbps", float64(*s))
 }

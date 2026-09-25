@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -21,6 +23,15 @@ import (
 var Version = "v2.0.20260922"
 var zlog *zap.Logger
 var nextAdminPort int32
+
+// logLevel is the live handle on the process-wide log level. The web UI's
+// "debug log" switch flips it at runtime through SetDebug, so the saved
+// setting takes effect without a restart.
+var logLevel zap.AtomicLevel
+
+// logBase is the non-debug level the process was started with (Error for
+// quiet, Info otherwise); turning debug back off returns to it.
+var logBase = zapcore.InfoLevel
 
 const (
 	peakSampleInterval = 200 * time.Millisecond
@@ -70,6 +81,13 @@ func (cfg *RunConfig) Validate() error {
 	if cfg.TestURL == "" {
 		return errors.New("missing test URL")
 	}
+	// Reject malformed URLs up front: an URL that only fails to parse inside
+	// runPeerTest would otherwise spin up a full Yggdrasil node per peer before
+	// discovering the problem.
+	u, err := url.Parse(cfg.TestURL)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("invalid test URL %q: must be an absolute http(s) URL", cfg.TestURL)
+	}
 	if cfg.Concurrency < 1 {
 		return errors.New("concurrency must be at least 1")
 	}
@@ -99,6 +117,57 @@ func (cfg *RunConfig) Validate() error {
 	return nil
 }
 
+// isYggdrasilAddr reports whether ip falls into 200::/7, the range the
+// Yggdrasil network routes. The built-in gVisor netstack only has a route for
+// this range, so a download target outside it can never be reached and every
+// peer would fail with "network is unreachable" after wasting its full
+// handshake and route-convergence budget.
+func isYggdrasilAddr(ip net.IP) bool {
+	b := ip.To16()
+	if b == nil || ip.To4() != nil {
+		return false
+	}
+	return b[0]&0xFE == 0x02
+}
+
+// warnIfUnreachableTarget gives an early, human-readable warning when the test
+// URL points outside the Yggdrasil network. It is best effort on purpose: with
+// a custom in-Yggdrasil DNS the per-peer resolution can legitimately differ
+// from this one, so the check stays silent whenever it cannot be certain.
+func warnIfUnreachableTarget(ctx context.Context, testURL, customDNS string) {
+	if customDNS != "" {
+		return
+	}
+	u, err := url.Parse(testURL)
+	if err != nil || u.Hostname() == "" {
+		return
+	}
+	if ip := net.ParseIP(u.Hostname()); ip != nil {
+		if !isYggdrasilAddr(ip) {
+			logUnreachableTarget(u.Hostname())
+		}
+		return
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	ips, err := net.DefaultResolver.LookupIPAddr(lookupCtx, u.Hostname())
+	if err != nil || len(ips) == 0 {
+		return
+	}
+	for _, ip := range ips {
+		if isYggdrasilAddr(ip.IP) {
+			return
+		}
+	}
+	logUnreachableTarget(u.Hostname())
+}
+
+func logUnreachableTarget(host string) {
+	zlog.Warn("Test URL target is outside the Yggdrasil range 200::/7; every peer will fail",
+		zap.String("host", host),
+		zap.String("hint", "the built-in userspace netstack can only download from Yggdrasil-internal addresses; point -url at a host inside the Yggdrasil network"))
+}
+
 // PeerSources gathers and deduplicates the peer list from every configured
 // source. The public list is fetched only when nothing was supplied, so an
 // interrupted fetch never throws away the operator's own list.
@@ -119,7 +188,7 @@ func PeerSources(ctx context.Context, cfg RunConfig) ([]string, error) {
 
 	if cfg.PublicPeers || len(peers) == 0 {
 		zlog.Info("Fetching public Yggdrasil peers from online repository")
-		pubPeers, fetchErr := fetchPublicPeers()
+		pubPeers, fetchErr := fetchPublicPeers(ctx)
 		// A failed fetch is not fatal: the fallback list is returned alongside
 		// it, so a run can still start. It just means the sample is small and
 		// stale.
@@ -137,7 +206,7 @@ func PeerSources(ctx context.Context, cfg RunConfig) ([]string, error) {
 // loadOrGenerateKey pins this node's identity to keyFile when the operator
 // asked for one, so re-running a batch measures the same node.
 func loadOrGenerateKey(keyFile string, cfg *config.NodeConfig) error {
-	if _, err := os.Stat(keyFile); os.IsNotExist(err) {
+	if _, err := os.Stat(keyFile); errors.Is(err, os.ErrNotExist) {
 		privHex := hex.EncodeToString(cfg.PrivateKey)
 		if err := os.WriteFile(keyFile, []byte(privHex), 0600); err != nil {
 			return fmt.Errorf("write private key: %w", err)
@@ -150,7 +219,9 @@ func loadOrGenerateKey(keyFile string, cfg *config.NodeConfig) error {
 		return fmt.Errorf("read private key: %w", err)
 	}
 	minConf := fmt.Sprintf(`{"PrivateKey": "%s"}`, strings.TrimSpace(string(keyBytes)))
-	cfg.ReadFrom(strings.NewReader(minConf))
+	if _, err := cfg.ReadFrom(strings.NewReader(minConf)); err != nil {
+		return fmt.Errorf("parse private key file %s: %w", keyFile, err)
+	}
 	return nil
 }
 
@@ -173,6 +244,12 @@ func InitLogger(debug bool, quiet bool) {
 	zapConfig.OutputPaths = []string{"stdout"}
 	zapConfig.ErrorOutputPaths = []string{"stderr"}
 
+	logBase = zapcore.InfoLevel
+	if quiet {
+		logBase = zapcore.ErrorLevel
+	}
+	logLevel = zapConfig.Level
+
 	var err error
 	zlog, err = zapConfig.Build()
 	if err != nil {
@@ -181,8 +258,24 @@ func InitLogger(debug bool, quiet bool) {
 	// The netstack layer used to write raw gvisor logs straight to stdout,
 	// which drowned the result table in RWC noise. Route it through zap so -debug
 	// keeps the detail and normal runs stay clean.
+	SetDebug(debug)
+}
+
+// SetDebug turns debug logging on or off at runtime. It is safe to call before
+// InitLogger (it does nothing) and more than once.
+func SetDebug(debug bool) {
 	if debug {
 		netstack.SetDebugLogger(zlog.Sugar().Debugf)
+	} else {
+		netstack.SetDebugLogger(nil)
+	}
+	if zlog == nil {
+		return
+	}
+	if debug {
+		logLevel.SetLevel(zapcore.DebugLevel)
+	} else {
+		logLevel.SetLevel(logBase)
 	}
 }
 
@@ -253,6 +346,7 @@ func resolveRun(ctx context.Context, cfg RunConfig) (runPlan, error) {
 	if err := cfg.Validate(); err != nil {
 		return runPlan{}, err
 	}
+	warnIfUnreachableTarget(ctx, cfg.TestURL, cfg.CustomDNS)
 	peers, err := PeerSources(ctx, cfg)
 	if err != nil {
 		return runPlan{}, err

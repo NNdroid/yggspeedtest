@@ -8,6 +8,8 @@ import (
 	"io"
 	"math"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"runtime"
@@ -46,13 +48,13 @@ func TestParseByteSize(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		got, err := parseByteSize(tc.in)
+		got, err := ParseByteSize(tc.in)
 		if (err != nil) != tc.wantErr {
-			t.Errorf("parseByteSize(%q) error = %v, wantErr %v", tc.in, err, tc.wantErr)
+			t.Errorf("ParseByteSize(%q) error = %v, wantErr %v", tc.in, err, tc.wantErr)
 			continue
 		}
 		if err == nil && got != tc.want {
-			t.Errorf("parseByteSize(%q) = %d, want %d", tc.in, got, tc.want)
+			t.Errorf("ParseByteSize(%q) = %d, want %d", tc.in, got, tc.want)
 		}
 	}
 }
@@ -60,19 +62,19 @@ func TestParseByteSize(t *testing.T) {
 // Values that fit must parse, and values that overflow int64 have to be
 // rejected rather than silently wrapping to a small positive size.
 func TestParseByteSizeOverflowBoundary(t *testing.T) {
-	if got, err := parseByteSize("8GB"); err != nil {
-		t.Fatalf("parseByteSize(8GB) unexpected error: %v", err)
+	if got, err := ParseByteSize("8GB"); err != nil {
+		t.Fatalf("ParseByteSize(8GB) unexpected error: %v", err)
 	} else if got != 8<<30 {
-		t.Errorf("parseByteSize(8GB) = %d, want %d", got, int64(8)<<30)
+		t.Errorf("ParseByteSize(8GB) = %d, want %d", got, int64(8)<<30)
 	}
 
-	if _, err := parseByteSize("16GB"); err != nil {
+	if _, err := ParseByteSize("16GB"); err != nil {
 		t.Errorf("16GB should fit in int64, got error: %v", err)
 	}
-	if _, err := parseByteSize("10000000000GB"); err == nil {
+	if _, err := ParseByteSize("10000000000GB"); err == nil {
 		t.Error("10000000000GB should overflow int64 and error")
 	}
-	if _, err := parseByteSize("99999999999999999999GB"); err == nil {
+	if _, err := ParseByteSize("99999999999999999999GB"); err == nil {
 		t.Error("huge value should overflow int64 and error")
 	}
 	_ = math.MaxInt64
@@ -128,7 +130,7 @@ func TestExporters(t *testing.T) {
 	dir := t.TempDir()
 
 	csvPath := dir + string(os.PathSeparator) + "out.csv"
-	if err := exportCSV(csvPath, results); err != nil {
+	if err := ExportCSVFile(csvPath, results); err != nil {
 		t.Fatalf("exportCSV: %v", err)
 	}
 	csvBytes, err := os.ReadFile(csvPath)
@@ -151,7 +153,7 @@ func TestExporters(t *testing.T) {
 	}
 
 	mdPath := dir + string(os.PathSeparator) + "out.md"
-	if err := exportMarkdown(mdPath, results); err != nil {
+	if err := ExportMarkdownFile(mdPath, results); err != nil {
 		t.Fatalf("exportMarkdown: %v", err)
 	}
 	mdBytes, err := os.ReadFile(mdPath)
@@ -173,13 +175,14 @@ func TestExportCSVReportsWriteError(t *testing.T) {
 		t.Skip("directory-as-file is not reliably an error on Windows")
 	}
 	dir := t.TempDir()
-	if err := exportCSV(dir, nil); err == nil {
+	if err := ExportCSVFile(dir, nil); err == nil {
 		t.Error("exportCSV writing into a directory should fail")
 	}
 }
 
 // Regression guard: PingMs is optional, and the console table used to
-// dereference it unconditionally.
+// dereference it unconditionally. A missing rate must render as "-" like the
+// other missing measurements, not as a fake "0.000 Mbps".
 func TestPrintConsoleTableWithMissingMeasurements(t *testing.T) {
 	results := []SpeedResult{
 		{Peer: "tls://no-data:443", TestTime: "2026-09-21T12:00:00Z"}, // all pointers nil
@@ -188,23 +191,16 @@ func TestPrintConsoleTableWithMissingMeasurements(t *testing.T) {
 			HandshakeMs: pf(12), PingMs: pf(88), DownloadMbps: sf(1), PeakMbps: sf(2)},
 	}
 	var out strings.Builder
-	old := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = w
-	printConsoleTable(results)
-	w.Close()
-	os.Stdout = old
-	_, _ = io.Copy(&out, r)
-	r.Close()
+	PrintConsoleTable(&out, results)
 
 	got := out.String()
 	for _, want := range []string{"YggSpeedTest 测速排行榜", "tls://good:443", "tls://no-data:443", "Handshake failed"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("table missing %q:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "0.000 Mbps") {
+		t.Errorf("a missing rate must not print as 0.000 Mbps:\n%s", got)
 	}
 }
 
@@ -799,5 +795,274 @@ func TestWriteCheckpointLineIsJSONL(t *testing.T) {
 		if got.Peer != results[i].Peer {
 			t.Errorf("line %d peer = %q, want %q", i, got.Peer, results[i].Peer)
 		}
+	}
+}
+
+func TestIsYggdrasilAddr(t *testing.T) {
+	cases := []struct {
+		ip   string
+		want bool
+	}{
+		{"200::1", true},
+		{"201:1234:5678::1", true},
+		{"203:0:0::1", true},
+		{"2606:4700:4700::1111", false}, // clearnet IPv6
+		{"1.2.3.4", false},              // IPv4 can never route here
+		{"::1", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := isYggdrasilAddr(net.ParseIP(tc.ip)); got != tc.want {
+			t.Errorf("isYggdrasilAddr(%q) = %v, want %v", tc.ip, got, tc.want)
+		}
+	}
+}
+
+func TestValidateRejectsBadTestURL(t *testing.T) {
+	base := RunConfig{
+		TestURL:      "http://[201:1::1]/file.bin",
+		SortBy:       "speed",
+		Concurrency:  1,
+		Streams:      1,
+		Timeout:      time.Second,
+		RouteTimeout: time.Second,
+		MaxDuration:  time.Second,
+	}
+	if err := base.Validate(); err != nil {
+		t.Fatalf("valid config rejected: %v", err)
+	}
+
+	for name, url := range map[string]string{
+		"missing":   "",
+		"relative":  "file.bin",
+		"no scheme": "[201:1::1]/file.bin",
+		"ftp":       "ftp://[201:1::1]/file.bin",
+		"no host":   "http://",
+	} {
+		cfg := base
+		cfg.TestURL = url
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("%s: URL %q should have been rejected", name, url)
+		}
+	}
+}
+
+// fetchPublicPeers must merge every configured source and tolerate a failing
+// one: an earlier version returned after the first region that yielded peers,
+// quietly reducing the cross-region sample to a single country.
+func TestFetchPublicPeersMergesAllSources(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/a.md", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "## Europe\n`tls://a1.example:443`\n`tls://a2.example:443`")
+	})
+	mux.HandleFunc("/b.md", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "`tls://b1.example:443`")
+	})
+	mux.HandleFunc("/c.md", func(w http.ResponseWriter, r *http.Request) {
+		// A source that yields nothing is a failure, not an empty success.
+		fmt.Fprint(w, "no addresses here")
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	orig := publicPeerSources
+	publicPeerSources = []string{
+		srv.URL + "/a.md",
+		srv.URL + "/b.md",
+		srv.URL + "/c.md",
+		srv.URL + "/missing.md",
+	}
+	defer func() { publicPeerSources = orig }()
+
+	peers, err := fetchPublicPeers(context.Background())
+	if err != nil {
+		t.Fatalf("fetchPublicPeers: %v", err)
+	}
+	for _, want := range []string{"tls://a1.example:443", "tls://a2.example:443", "tls://b1.example:443"} {
+		found := false
+		for _, p := range peers {
+			if p == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("merged list missing %s: %v", want, peers)
+		}
+	}
+	if len(peers) != 3 {
+		t.Errorf("merged list = %v, want 3 deduplicated peers", peers)
+	}
+}
+
+// With no source producing anything, the built-in fallback list is returned
+// alongside an error so the caller can warn about the stale sample.
+func TestFetchPublicPeersFallsBackWhenAllSourcesFail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	orig := publicPeerSources
+	publicPeerSources = []string{srv.URL + "/a.md", srv.URL + "/b.md"}
+	defer func() { publicPeerSources = orig }()
+
+	peers, err := fetchPublicPeers(context.Background())
+	if err == nil {
+		t.Error("an all-failed fetch must report an error alongside the fallback list")
+	}
+	if len(peers) == 0 {
+		t.Error("fallback peers must still be returned so a run can start")
+	}
+}
+
+// A minimal SOCKS5 server: method negotiation (optionally username/password),
+// CONNECT, then a silent open socket. The pre-flight must come out the other
+// side with a measured handshake time.
+type socksTestServer struct {
+	listener net.Listener
+	wantAuth bool
+	authOK   chan struct{}
+}
+
+func serveSocks(t *testing.T, wantAuth bool) *socksTestServer {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &socksTestServer{listener: l, wantAuth: wantAuth, authOK: make(chan struct{})}
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(conn, buf); err != nil {
+			return
+		}
+		nMethods := int(buf[1])
+		methods := make([]byte, nMethods)
+		if _, err := io.ReadFull(conn, methods); err != nil {
+			return
+		}
+		chosen := byte(0x00)
+		if wantAuth {
+			chosen = 0x02
+		}
+		conn.Write([]byte{0x05, chosen})
+		if wantAuth {
+			hdr := make([]byte, 2)
+			if _, err := io.ReadFull(conn, hdr); err != nil {
+				return
+			}
+			ulen := int(hdr[1])
+			uname := make([]byte, ulen)
+			if _, err := io.ReadFull(conn, uname); err != nil {
+				return
+			}
+			plen := make([]byte, 1)
+			if _, err := io.ReadFull(conn, plen); err != nil {
+				return
+			}
+			pass := make([]byte, int(plen[0]))
+			if _, err := io.ReadFull(conn, pass); err != nil {
+				return
+			}
+			if string(uname) != "user" || string(pass) != "pass" {
+				conn.Write([]byte{0x01, 0x01})
+				return
+			}
+			conn.Write([]byte{0x01, 0x00})
+		}
+
+		req := make([]byte, 4)
+		if _, err := io.ReadFull(conn, req); err != nil {
+			return
+		}
+		switch req[3] {
+		case 0x01:
+			rest := make([]byte, 6)
+			_, _ = io.ReadFull(conn, rest)
+		case 0x04:
+			rest := make([]byte, 18)
+			_, _ = io.ReadFull(conn, rest)
+		case 0x03:
+			ln := make([]byte, 1)
+			if _, err := io.ReadFull(conn, ln); err != nil {
+				return
+			}
+			rest := make([]byte, int(ln[0])+2)
+			_, _ = io.ReadFull(conn, rest)
+		}
+		conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		close(s.authOK)
+	}()
+	return s
+}
+
+func TestMeasureHandshakeSocks(t *testing.T) {
+	t.Run("plain", func(t *testing.T) {
+		s := serveSocks(t, false)
+		defer s.listener.Close()
+
+		ms, ok, err := measureHandshake(context.Background(),
+			fmt.Sprintf("socks://%s/[201:dead::beef]:443", s.listener.Addr()), "", 5*time.Second)
+		if err != nil || !ok || ms < 0 {
+			t.Errorf("ms=%v ok=%v err=%v", ms, ok, err)
+		}
+		select {
+		case <-s.authOK:
+		default:
+			t.Error("server never completed CONNECT")
+		}
+	})
+
+	t.Run("auth", func(t *testing.T) {
+		s := serveSocks(t, true)
+		defer s.listener.Close()
+
+		ms, ok, err := measureHandshake(context.Background(),
+			fmt.Sprintf("socks://user:pass@%s/[201:dead::beef]:443", s.listener.Addr()), "", 5*time.Second)
+		if err != nil || !ok || ms < 0 {
+			t.Errorf("ms=%v ok=%v err=%v", ms, ok, err)
+		}
+	})
+
+	t.Run("missing port is rejected", func(t *testing.T) {
+		if _, _, err := measureHandshake(context.Background(),
+			"socks://proxy.example/[201:dead::beef]:443", "", 5*time.Second); err == nil {
+			t.Error("a socks URI without an explicit proxy port should fail the pre-flight")
+		}
+	})
+}
+
+// A kcp probe measures reachability, not a handshake, so the result must not
+// carry a fabricated handshake time.
+func TestMeasureHandshakeKcpHasNoFakeDuration(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	go func() {
+		buf := make([]byte, 512)
+		for {
+			_, addr, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			pc.WriteTo(buf[:4], addr) // reply with something
+		}
+	}()
+
+	_, ok, err := measureHandshake(context.Background(),
+		fmt.Sprintf("kcp://%s", pc.LocalAddr()), "", 5*time.Second)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if ok {
+		t.Error("a kcp reachability probe must not claim to be a handshake measurement")
 	}
 }

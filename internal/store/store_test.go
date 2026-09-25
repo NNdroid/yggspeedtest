@@ -20,8 +20,8 @@ func TestLoadMissingFileGivesDefaults(t *testing.T) {
 	if cfg.ListenAddr != "127.0.0.1:8080" {
 		t.Errorf("ListenAddr = %q", cfg.ListenAddr)
 	}
-	if cfg.TestURL == "" {
-		t.Error("TestURL has no default")
+	if cfg.TestURL != "" {
+		t.Errorf("TestURL = %q, want empty: the netstack can only download from Yggdrasil-internal addresses, so there is no honest default", cfg.TestURL)
 	}
 	if cfg.Concurrency != 1 || cfg.Streams != 4 {
 		t.Errorf("Concurrency=%d Streams=%d, want 1 and 4", cfg.Concurrency, cfg.Streams)
@@ -38,7 +38,6 @@ func TestLoadRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	in := Config{
 		ListenAddr:   "0.0.0.0:9090",
-		DataDir:      "/srv/ygg",
 		HistoryLimit: 500,
 		Peers:        []string{"tls://a:443", "tls://b:443"},
 		PeersFile:    "/etc/peers.txt",
@@ -87,8 +86,8 @@ func TestLoadRoundTrip(t *testing.T) {
 
 func assertEqualConfig(t *testing.T, a, b Config) error {
 	t.Helper()
-	if a.ListenAddr != b.ListenAddr || a.DataDir != b.DataDir || a.HistoryLimit != b.HistoryLimit {
-		return fmt.Errorf("listen/data/history differ: %+v vs %+v", a, b)
+	if a.ListenAddr != b.ListenAddr || a.HistoryLimit != b.HistoryLimit {
+		return fmt.Errorf("listen/history differ: %+v vs %+v", a, b)
 	}
 	if a.TestURL != b.TestURL || a.CustomSNI != b.CustomSNI {
 		return fmt.Errorf("url/sni differ")
@@ -500,4 +499,52 @@ func TestWriteFileAtomicLeavesNoTemp(t *testing.T) {
 
 func fmtID(i int) string {
 	return fmt.Sprintf("run-%04d", i)
+}
+
+// The dashboard polls /api/status every few seconds; the count must come from
+// a line scan rather than a full JSON decode of every record.
+func TestCountRuns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runs.jsonl")
+
+	n, err := CountRuns(path)
+	if err != nil || n != 0 {
+		t.Fatalf("missing file: n=%d err=%v, want 0 nil", n, err)
+	}
+
+	if err := AppendRun(path, RunRecord{ID: "a"}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := AppendRun(path, RunRecord{ID: "b"}, 0); err != nil {
+		t.Fatal(err)
+	}
+	n, err = CountRuns(path)
+	if err != nil || n != 2 {
+		t.Fatalf("after two appends: n=%d err=%v, want 2 nil", n, err)
+	}
+}
+
+// A zero history limit picks up a bounded default (the runs file would
+// otherwise grow without end); a negative limit means keep everything.
+func TestHistoryLimitDefaultAndUnlimited(t *testing.T) {
+	cfg, err := Load(filepath.Join(t.TempDir(), "nope.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HistoryLimit != 100 {
+		t.Errorf("HistoryLimit default = %d, want 100", cfg.HistoryLimit)
+	}
+
+	path := filepath.Join(t.TempDir(), "runs.jsonl")
+	for _, id := range []string{"a", "b", "c", "d"} {
+		if err := AppendRun(path, RunRecord{ID: id}, -1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runs, err := LoadRuns(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 4 {
+		t.Errorf("negative limit kept %d runs, want all 4", len(runs))
+	}
 }

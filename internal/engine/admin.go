@@ -209,24 +209,25 @@ func waitForRoute(ctx context.Context, adminPort int, addr, peerURI string, time
 
 // kcpReachabilityProbe reports reachability for a kcp:// peer. A write to a
 // UDP socket proves nothing by itself, so the probe sends a packet and waits
-// for any reply. No number printed from here can be called a handshake time.
-func kcpReachabilityProbe(ctx context.Context, addr string) (float64, error) {
+// for any reply. It deliberately returns no duration: no number printed from
+// here can be called a handshake time.
+func kcpReachabilityProbe(ctx context.Context, addr string) error {
 	conn, err := net.Dial("udp", addr)
 	if err != nil {
-		return 0, err
+		return err
 	}
 	defer conn.Close()
 
 	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		return 0, err
+		return err
 	}
 	if _, err := conn.Write([]byte("YggSpeedTest-probe")); err != nil {
-		return 0, err
+		return err
 	}
 
 	buf := make([]byte, 512)
 	if _, err := conn.Read(buf); err != nil {
-		return 0, fmt.Errorf("no reply from %s: %w", addr, err)
+		return fmt.Errorf("no reply from %s: %w", addr, err)
 	}
-	return 0, nil
+	return nil
 }

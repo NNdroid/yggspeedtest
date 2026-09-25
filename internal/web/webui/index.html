@@ -208,8 +208,8 @@ async function req(path, opts){
 
 /* ---------- config form ---------- */
 const FIELDS = [
-  ['peer', 'Peer 列表（每行一个）', 'textarea'],
-  ['test_url', '测速 URL', 'text'],
+  ['peer', 'Peer 列表（每行一个；留空 = 使用已保存的节点，也可只填几行临时测）', 'textarea'],
+  ['test_url', '测速 URL（必须是 Yggdrasil 网内 200::/7 的地址）', 'text'],
   ['custom_host', '自定义 Host', 'text'],
   ['custom_sni', '自定义 SNI', 'text'],
   ['custom_dns', '自定义 DNS', 'text'],
@@ -218,18 +218,17 @@ const FIELDS = [
   ['concurrency', '并发数', 'number'],
   ['streams', '下载并发流', 'number'],
   ['limit', 'Peer 数量上限', 'number'],
-  ['max_duration', '单次最长时长', 'text'],
-  ['max_bytes', '单次最大下载', 'text'],
+  ['max_duration', '单次最长时长（0 = 不限）', 'text'],
+  ['max_bytes', '单次最大下载（如 50MB）', 'text'],
   ['timeout', '握手超时', 'text'],
   ['route_timeout', '路由超时', 'text'],
   ['sort', '排序方式', 'select'],
   ['min_speed', '最低速率 Mbps', 'number'],
   ['max_ping', '最大 Ping ms', 'number'],
   ['listen_addr', '监听地址', 'text'],
-  ['history_limit', '历史保留条数', 'number'],
-  ['data_dir', '数据目录', 'text'],
+  ['history_limit', '历史保留条数（-1 = 不限）', 'number'],
   ['public_peers', '拉取公共 Peer', 'check'],
-  ['debug', '调试日志', 'check'],
+  ['debug', '调试日志（保存后立即生效）', 'check'],
 ];
 function buildForm(){
   const body = $('cfgBody');
@@ -404,8 +403,8 @@ async function openRun(id){
       <th class="num">握手</th><th class="num">Ping</th><th class="num">下载</th>
       <th class="num">耗时</th><th>状态</th>
     </tr></thead><tbody>` + rs.map((r, i) => {
-      const mb = r.bytes_download && r.bytes_download > 0
-        ? (r.bytes_download / 1048576).toFixed(2) + ' MB' : '—';
+      const mb = r.bytes_downloaded && r.bytes_downloaded > 0
+        ? (r.bytes_downloaded / 1048576).toFixed(2) + ' MB' : '—';
       return `<tr>
         <td class="muted">${i + 1}</td>
         <td class="peer" title="${esc(r.peer)}">${esc(r.peer || '—')}</td>
@@ -592,13 +591,22 @@ async function save(){
 }
 async function go(){
   if (busy) return;
+  const body = readForm();
+  // Fail in the UI, not on the server: an empty URL would otherwise start a
+  // run that fails before it tests anything.
+  if (!body.test_url) {
+    toast('请先在下方填写测速 URL（Yggdrasil 网内 200::/7 的地址）', 'bad');
+    return;
+  }
   $('btnRun').disabled = true;
   try {
-    const body = readForm();
+    // An empty peer textarea means "run the saved config": sending an empty
+    // list instead would silently switch the run to the public peer list.
+    const payload = body.peer.length ? {peer: body.peer} : {};
     await req('/api/run', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({peer: body.peer}),
+      body: JSON.stringify(payload),
     });
     toast('已启动，等待结果…', 'ok');
     await refreshStatus();

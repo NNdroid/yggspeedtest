@@ -49,9 +49,6 @@ func ParseByteSize(s string) (int64, error) {
 	return int64(total), nil
 }
 
-// parseByteSize is the package-internal form used by the tests.
-func parseByteSize(s string) (int64, error) { return ParseByteSize(s) }
-
 // getUniqueAdminPort hands out a free loopback port to each spawned admin
 // service. The counter is monotonic and wraps inside the reserved range, so
 // two concurrent tests never share a port and a long-running process does not

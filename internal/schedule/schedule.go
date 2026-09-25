@@ -251,13 +251,16 @@ func (s Spec) Match(t time.Time) bool {
 }
 
 // NextAfter returns the first time strictly after t that this schedule fires,
-// scanning forward at most two years.
+// scanning forward at most four years. Four years is what a leap-day schedule
+// needs in the worst case: just past Feb 29, the next one is almost four full
+// years away, and a two-year window (as an earlier version used) would have
+// reported `0 0 29 2 *` as having no firing at all.
 func (s Spec) NextAfter(t time.Time) (time.Time, bool) {
 	if s.Kind == Interval {
 		return t.Add(s.Every), true
 	}
 	c := t.Truncate(time.Minute).Add(time.Minute)
-	for i := 0; i < 366*24*60; i++ {
+	for i := 0; i < 4*366*24*60; i++ {
 		if s.Match(c) {
 			return c, true
 		}

@@ -196,9 +196,11 @@ func (e *YggdrasilNIC) writePacket(
 func (e *YggdrasilNIC) WritePackets(
 	list stack.PacketBufferList,
 ) (int, tcpip.Error) {
-	var i int = 0
-	var err tcpip.Error = nil
-	for i, pkt := range list.AsSlice() {
+	// written counts the packets that actually made it out; the caller uses
+	// the count to account for its work, so a stale or negative number here
+	// would misreport every batch.
+	written := 0
+	for _, pkt := range list.AsSlice() {
 		if pkt.Data().Size() == 0 {
 			if pkt.Network().TransportProtocol() == tcp.ProtocolNumber {
 				tcpHeader := header.TCP(pkt.TransportHeader().Slice())
@@ -215,14 +217,14 @@ func (e *YggdrasilNIC) WritePackets(
 				}
 			}
 		}
-		err = e.writePacket(pkt)
-		if err != nil {
+		if err := e.writePacket(pkt); err != nil {
 			debugLogf("Yggdrasil writePackets failed: %v", err)
-			return i - 1, err
+			return written, err
 		}
+		written++
 	}
 
-	return i, nil
+	return written, nil
 }
 
 func (e *YggdrasilNIC) WriteRawPacket(*stack.PacketBuffer) tcpip.Error {

@@ -1112,3 +1112,74 @@ func marshal(t *testing.T, v any) string {
 	}
 	return string(data)
 }
+
+// A request body that exists but does not parse is a client mistake. The old
+// handler ignored decode errors, so a caller posting {"peer": "tls://..."}
+// (a string where an array belongs) silently started a run with the saved
+// peers instead of the ones it asked for.
+func TestRunRejectsMalformedBody(t *testing.T) {
+	_, ts := newTestServer(t)
+	defer ts.Close()
+
+	for name, body := range map[string]string{
+		"not json":        "{oops",
+		"peer not array":  `{"peer": "tls://a:443"}`,
+		"empty peer item": `{"peer": ["  "]}`,
+	} {
+		resp, err := http.Post(ts.URL+"/api/run", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", name, resp.StatusCode)
+		}
+	}
+
+	// An absent body is still the valid "run the saved config" request.
+	resp, err := http.Post(ts.URL+"/api/run", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Errorf("empty body: status = %d, want 202", resp.StatusCode)
+	}
+}
+
+// An open event stream must not hold up http.Server.Shutdown: SSE handlers
+// never return on their own, so Cancel has to end them.
+func TestCancelEndsEventStreams(t *testing.T) {
+	s, ts := newTestServer(t)
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	rd := bufio.NewReader(resp.Body)
+	if _, err := rd.ReadString('\n'); err != nil {
+		t.Fatalf("read hello: %v", err)
+	}
+
+	s.Cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := io.ReadAll(resp.Body)
+		done <- err
+	}()
+	select {
+	case <-done:
+		// The stream ended promptly once the server cancelled it.
+	case <-time.After(2 * time.Second):
+		t.Fatal("event stream did not end after Cancel")
+	}
+}

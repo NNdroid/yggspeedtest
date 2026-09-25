@@ -62,6 +62,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// A -debug flag wins; otherwise the saved "debug log" switch from the UI
+	// applies, so the setting survives a restart.
+	if !*debug && cfg.Debug {
+		engine.SetDebug(true)
+	}
+
 	if *listen == "" {
 		*listen = cfg.ListenAddr
 	}
